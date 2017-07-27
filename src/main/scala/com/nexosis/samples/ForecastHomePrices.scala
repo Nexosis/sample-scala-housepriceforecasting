@@ -9,8 +9,7 @@ import java.util.UUID
 
 import org.jfree.chart.{ChartFactory, ChartUtilities}
 import org.jfree.chart.axis.{DateAxis, DateTickUnit, DateTickUnitType}
-import org.jfree.chart.plot.{PlotOrientation, XYPlot}
-import org.jfree.data.category.DefaultCategoryDataset
+import org.jfree.chart.plot.XYPlot
 import org.jfree.data.time.{Day, RegularTimePeriod, TimeSeries, TimeSeriesCollection}
 import org.joda.time.{DateTime, DateTimeZone}
 import org.joda.time.format.DateTimeFormat
@@ -22,24 +21,22 @@ object ForecastHomePrices {
   private val path = System.getProperty("user.dir") + "/data"
 
   def main(args: Array[String]): Unit = {
-    val sourceFile = path + "/State_Zhvi_BottomTier.csv"
-    //val timestamp: Long = System.currentTimeMillis / 1000
-    val timestamp : Long = 1500911996
+    val sourceFile = path + "/State_Zhvi_TopTier.csv"
+    val timestamp: Long = System.currentTimeMillis / 1000
+    //val timestamp: Long = 1501180476
     val dataSetNameSuffix = s"-housedata-${timestamp.toString}"
-
     val skipDataProcessing = true
-    val skipCreateSession = true
-
-    //deleteAllHousingData(client)
-
+    val skipCreateSession = false
     val bufferedSource = Source.fromFile(sourceFile).getLines
 
     val client = new NexosisClient(
-      sys.env("NEXOSIS_API_KEY"),
-      sys.env("NEXOSIS_BASE_TEST_URL")
+      sys.env("NEXOSIS_API_KEY")
     )
 
     try {
+      // keep this around to clean up datasets
+      //deleteAllHousingData(client)
+
       if (!skipDataProcessing) {
         buildDatasets(client, bufferedSource, dataSetNameSuffix)
       }
@@ -92,7 +89,6 @@ object ForecastHomePrices {
       }
       println(".")
       // Retrieve session data
-      //var results: SessionResult = new SessionResult
       val results = client.getSessions.getResults(id)
       // Retrieve historical data
       val dataset = client.getDataSets.get(results.getDataSetName, 0, 300, new util.ArrayList[String])
@@ -127,7 +123,7 @@ object ForecastHomePrices {
         // Create Forecast for the next 6 months (6 predictions points per dataset)
         val session = client.getSessions.createForecast(
           item.getDataSetName(),
-          "cost",
+          "value",
           DateTime.parse("2017-06-01T00:00:00Z"),
           DateTime.parse("2017-12-01T00:00:00Z"),
           ResultInterval.MONTH
@@ -152,7 +148,7 @@ object ForecastHomePrices {
       // Estimate Forecast for the next 6 months (6 predictions points per dataset)
       val estimate = client.getSessions.estimateForecast(
         item.getDataSetName(),
-        "cost",
+        "value",
         DateTime.parse("2017-06-01T00:00:00Z"),
         DateTime.parse("2017-12-01T00:00:00Z"),
         ResultInterval.MONTH
@@ -172,7 +168,7 @@ object ForecastHomePrices {
     // Now loop over the rest of the rows to get each state's data row
     while (bufferedSource.hasNext) {
       val cells = bufferedSource.next.split(",(?=([^\"]*\"[^\"]*\")*[^\"]*$)")
-      // Populate / Replace dataSetData cost data with data from the cells in the next row
+      // Populate / Replace dataSetData value data with data from the cells in the next row
       getRegionalData(dataSetNameSuffix, dataSetData, cells)
 
       // DataSet Data is complete, upload...
@@ -203,10 +199,10 @@ object ForecastHomePrices {
     cells.foreach { cell =>
       // ignore first 3 columns since they've been handled above
       if (count >= 3) {
-        val costs: util.Map[String, String] =
+        val values: util.Map[String, String] =
           new util.HashMap[String, String]()
-        costs.put("cost", cell)
-        regionData.get(count - 3).put("cost", cell)
+        values.put("value", cell)
+        regionData.get(count - 3).put("value", cell)
       }
       count += 1
     }
@@ -246,31 +242,29 @@ object ForecastHomePrices {
     // strip the headers off the top of the file and reuse column meta-data for each row.
     val cols = new Columns
     cols.setColumnMetadata("date", DataType.DATE, DataRole.TIMESTAMP)
-    cols.setColumnMetadata("cost", DataType.NUMERIC, DataRole.TARGET)
+    cols.setColumnMetadata("value", DataType.NUMERIC, DataRole.TARGET)
     // Add the columns to the DataSet Data
     dataSetData.setColumns(cols)
   }
 
   private def plotTimeSeries(dataSetData: DataSetData, results: SessionResult) = {
-    val historical = new TimeSeries("Historical Monthly Home Price")
-    val predictions = new TimeSeries("Predicted Monthly Home Price")
+    val historical = new TimeSeries("Historical Monthly Home Value")
+    val predictions = new TimeSeries("Predicted Monthly Home Value")
     val xySetToPlot = new TimeSeriesCollection
 
-    // Plot Dataset
+    // Plot Dataset data
     dataSetData.getData.forEach { item =>
       val period = RegularTimePeriod.createInstance(
         classOf[Day],
         DateTime.parse(item.get("date")).toDate,
         DateTimeZone.forID("UTC").toTimeZone
       )
-
       // Add data point to the chart
-      var cost = Try(Integer.parseInt(item.get("cost"))).getOrElse(0)
-      historical.add(period, cost)
+      var value = Try(Integer.parseInt(item.get("value"))).getOrElse(0)
+      historical.add(period, value)
     }
 
-    // Plot Results
-    // Plot Dataset
+    // Plot Results data
     results.getData.forEach { item =>
       val period = RegularTimePeriod.createInstance(
         classOf[Day],
@@ -279,67 +273,30 @@ object ForecastHomePrices {
       )
 
       // Add data point to the chart
-      var cost = Try((item.get("cost").toDouble)).getOrElse(0)
-      predictions.add(period, cost.asInstanceOf[Number].intValue())
+      var value = Try((item.get("value").toDouble)).getOrElse(0)
+      predictions.add(period, value.asInstanceOf[Number].intValue())
     }
     xySetToPlot.addSeries(historical)
     xySetToPlot.addSeries(predictions)
 
     val jfreechart = ChartFactory.createTimeSeriesChart(
-      dataSetData.getDataSetName,
-      "Year",
-      "House Cost",
-      xySetToPlot,
-      true,
-      true,
-      false
+      dataSetData.getDataSetName, "Year", "House Value", xySetToPlot, true, true, false
     );
 
     val xyplot = jfreechart.getPlot.asInstanceOf[XYPlot]
     val dateaxis = xyplot.getDomainAxis.asInstanceOf[DateAxis]
     dateaxis.setTickUnit(
-      new DateTickUnit(
-        DateTickUnitType.YEAR, 1, new SimpleDateFormat("yyyy")
-      ))
+      new DateTickUnit(DateTickUnitType.YEAR, 1, new SimpleDateFormat("yyyy")))
     dateaxis.setVerticalTickLabels(true)
 
     try
       ChartUtilities.saveChartAsJPEG(
         new File(path + "/" + dataSetData.getDataSetName + ".jpeg"),
-        jfreechart,
-        1000,
-        700
-      )
+        jfreechart, 1000, 700 )
     catch {
       case e: Exception =>
         println(e.toString)
     }
-  }
-
-  private def plotChart(dataSetData: DataSetData) = {
-    val line_chart_dataset = new DefaultCategoryDataset
-
-    dataSetData.getData.forEach {  item =>
-      line_chart_dataset.addValue(item.get("cost").toInt, "cost", DateTime.parse(item.get("date")))
-    }
-
-    val lineChartObject = ChartFactory.createLineChart(
-      "cost over time",
-      "Month/Year",
-      "Cost",
-      line_chart_dataset,
-      PlotOrientation.VERTICAL,
-      true,
-      true,
-      false
-    )
-
-    val width = 640
-    /* Width of the image */
-    val height = 480
-    /* Height of the image */
-    val lineChart = new File(path + "/" + dataSetData.getDataSetName + ".jpeg")
-    ChartUtilities.saveChartAsJPEG(lineChart, lineChartObject, width, height)
   }
 
   // Utility method
