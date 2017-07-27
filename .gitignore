@@ -1,3 +1,6 @@
+# CSV Files
+*.csv
+
 # Intellij project files
 *.iml
 *.ipr

@@ -92,8 +92,8 @@ object ForecastHomePrices {
       }
       println(".")
       // Retrieve session data
-      var results: SessionResult = new SessionResult
-      results = client.getSessions.getResults(id)
+      //var results: SessionResult = new SessionResult
+      val results = client.getSessions.getResults(id)
       // Retrieve historical data
       val dataset = client.getDataSets.get(results.getDataSetName, 0, 300, new util.ArrayList[String])
       // Build plot using historical and prediction and save it to disk
