@@ -15,118 +15,173 @@ import org.jfree.data.time.{Day, RegularTimePeriod, TimeSeries, TimeSeriesCollec
 import org.joda.time.{DateTime, DateTimeZone}
 import org.joda.time.format.DateTimeFormat
 
-import scala.io.Source
+import scala.io.{Source, StdIn}
 import scala.util.Try
 
 object ForecastHomePrices {
   private val path = System.getProperty("user.dir") + "/data"
 
   def main(args: Array[String]): Unit = {
+    val sourceFile = path + "/State_Zhvi_BottomTier.csv"
+    //val timestamp: Long = System.currentTimeMillis / 1000
+    val timestamp : Long = 1500911996
+    val dataSetNameSuffix = s"-housedata-${timestamp.toString}"
+
+    val skipDataProcessing = true
+    val skipCreateSession = true
+
+    //deleteAllHousingData(client)
+
+    val bufferedSource = Source.fromFile(sourceFile).getLines
+
     val client = new NexosisClient(
       sys.env("NEXOSIS_API_KEY"),
       sys.env("NEXOSIS_BASE_TEST_URL")
     )
 
-    val sourceFile = path + "/State_Zhvi_BottomTier.csv"
-    val bufferedSource = Source.fromFile(sourceFile).getLines
-    val idFiles = path + "/sessionlist.txt"
-    val skipDataProcessing = false
-    val skipCreateSession = false
-
-    //deleteAllHousingData(client)
-
     try {
       if (!skipDataProcessing) {
-        // Extract the dates off of the first row / header columns in the CSV
-        // and build a dataSetData object with all the dates
-        val dataSetData = ExtractHeadersAndDates(bufferedSource)
-
-        // Now loop over the rest of the rows to get each state's data row
-        while (bufferedSource.hasNext) {
-          val cells = bufferedSource.next.split(",(?=([^\"]*\"[^\"]*\")*[^\"]*$)")
-          // Populate / Replace dataSetData cost data with data from the cells in the next row
-          getRegionalData(dataSetData, cells)
-
-          // DataSet Data is complete, upload...
-          client.getDataSets.create(dataSetData.getDataSetName, dataSetData)
-        }
+        buildDatasets(client, bufferedSource, dataSetNameSuffix)
       }
 
-      val sessionList = new util.ArrayList[UUID]
+      var sessionList = new util.ArrayList[UUID]
+
+      // Estimate Cost of forcasting on all datasets
+      var totalEstimatedCost = estimateForecastSessions(client, dataSetNameSuffix)
+
+      println(s"Estimated cost of forceasting is: ${totalEstimatedCost}")
+      println(s"continue? Type 'y' for (y)es or anything else for no.")
+
+      val input = StdIn.readLine()
+      if (!input.equals("y")) {
+        System.exit(1)
+      }
 
       if (!skipCreateSession) {
-        // Enumerate datasets with the provided filter
-        val dataSetList = client.getDataSets.list("-housedata-")
-        using(new PrintWriter(new FileOutputStream(path + "/sessionlist.txt", true), true)) { pw =>
-          dataSetList.getItems.forEach { item =>
-            // Create Forecast for the next 6 months (6 predictions points per dataset)
-            val session = client.getSessions.createForecast(
-              item.getDataSetName(),
-              "cost",
-              DateTime.parse("2017-06-01T00:00:00Z"),
-              DateTime.parse("2017-12-01T00:00:00Z"),
-              ResultInterval.MONTH
-            )
-
-            // Collect all the session ID's to check status
-            val sessionId = session.getSessionId()
-            sessionList.add(sessionId)
-            // save em for later
-            pw.write(sessionId.toString + sys.props("line.separator"))
-          }
-        }
+        sessionList = createForecastSessions(client, dataSetNameSuffix)
       } else {
-        // Load from SessionList file.
-        try {
-          val sessionIdList = Source.fromFile(idFiles).getLines
-          while (sessionIdList.hasNext) {
-            sessionList.add(UUID.fromString(sessionIdList.next))
-          }
-        } catch {
-          case fnfe: FileNotFoundException => {
-            println(fnfe.getMessage)
-          }
-        }
+        sessionList = loadSavedSessionIds()
       }
 
-      // Wait for all sessions to finish.
-      sessionList.forEach { id =>
-        var status = client.getSessions.getStatus(id)
-        var results: SessionResult = new SessionResult
-
-        println("Waiting for " + id.toString + ".")
-        while (status.getStatus == SessionStatus.STARTED) {
-          results = client.getSessions.getResults(id)
-          Thread.sleep(2000)
-          status = client.getSessions.getStatus(id)
-        }
-      }
-
-      // All sessions completed, retrieve results
-      sessionList.forEach { id =>
-        // retrieve results
-        val results = client.getSessions.getResults(id)
-        // retrieve corresponding dataset - default record size is 100 - we have aprox ~250 - ask for 300
-        val dataset = client.getDataSets.get(results.getDataSetName, 0, 300, new util.ArrayList[String])
-        // Save the plots
-        plotTimeSeries(dataset, results)
-      }
+      waitAndPlotSessionResults(client, sessionList)
     } catch {
       case nce: NexosisClientException => {
-        println("Status: " + nce.getStatusCode)
-        println("Status: " + nce.getMessage)
+        println(s"Status: ${nce.getStatusCode}")
+        println(s"Status: ${nce.getMessage}")
         if (nce.getErrorResponse != null && nce.getErrorResponse.getErrorDetails != null) {
           nce.getErrorResponse.getErrorDetails.entrySet.forEach { entry =>
             println(entry.getKey + " " + entry.getValue)
           }
         }
-        println("Error Response: " + nce.getErrorResponse)
+        println(s"Error Response: ${nce.getErrorResponse}")
       }
     }
   }
 
+  private def waitAndPlotSessionResults(client: NexosisClient, sessionList: util.ArrayList[UUID]) = {
+    // Wait for all sessions to finish.
+    sessionList.forEach { id =>
+      var status = client.getSessions.getStatus(id)
+
+      print("Waiting for " + id.toString + ".")
+      while ((status.getStatus == SessionStatus.STARTED)
+        || (status.getStatus == SessionStatus.REQUESTED))  {
+        Thread.sleep(2000)
+        print(".")
+        status = client.getSessions.getStatus(id)
+      }
+      println(".")
+      // Retrieve session data
+      var results: SessionResult = new SessionResult
+      results = client.getSessions.getResults(id)
+      // Retrieve historical data
+      val dataset = client.getDataSets.get(results.getDataSetName, 0, 300, new util.ArrayList[String])
+      // Build plot using historical and prediction and save it to disk
+      plotTimeSeries(dataset, results)
+    }
+  }
+
+  private def loadSavedSessionIds(): util.ArrayList[UUID] = {
+    val sessionList = new util.ArrayList[UUID]
+    // Load from saved sessionList file.
+    try {
+      val idFiles = path + "/sessionlist--housedata-1500911996.txt"
+      val sessionIdList = Source.fromFile(idFiles).getLines
+      while (sessionIdList.hasNext) {
+        sessionList.add(UUID.fromString(sessionIdList.next))
+      }
+    } catch {
+      case fnfe: FileNotFoundException => {
+        println(fnfe.getMessage)
+      }
+    }
+    return sessionList
+  }
+
+  private def createForecastSessions(client: NexosisClient, dataSetNameSuffix: String): util.ArrayList[UUID] = {
+    val sessionList = new util.ArrayList[UUID]
+    // Enumerate datasets with the provided filter
+    val dataSetList = client.getDataSets.list(dataSetNameSuffix)
+    using(new PrintWriter(new FileOutputStream(path + s"/sessionlist-${dataSetNameSuffix}.txt", true), true)) { pw =>
+      dataSetList.getItems.forEach { item =>
+        // Create Forecast for the next 6 months (6 predictions points per dataset)
+        val session = client.getSessions.createForecast(
+          item.getDataSetName(),
+          "cost",
+          DateTime.parse("2017-06-01T00:00:00Z"),
+          DateTime.parse("2017-12-01T00:00:00Z"),
+          ResultInterval.MONTH
+        )
+
+        // Collect all the session ID's to check status
+        val sessionId = session.getSessionId()
+        sessionList.add(sessionId)
+        // save em for later
+        pw.write(sessionId.toString + sys.props("line.separator"))
+      }
+    }
+    return sessionList
+  }
+
+  private def estimateForecastSessions(client: NexosisClient, dataSetNameSuffix: String): BigDecimal = {
+    // Enumerate datasets with the provided filter
+    val dataSetList = client.getDataSets.list(dataSetNameSuffix)
+
+    var totalCost : BigDecimal = 0.0
+    dataSetList.getItems.forEach { item =>
+      // Estimate Forecast for the next 6 months (6 predictions points per dataset)
+      val estimate = client.getSessions.estimateForecast(
+        item.getDataSetName(),
+        "cost",
+        DateTime.parse("2017-06-01T00:00:00Z"),
+        DateTime.parse("2017-12-01T00:00:00Z"),
+        ResultInterval.MONTH
+      ).asInstanceOf[ReturnsCost]
+
+      println(s"${item.getDataSetName} costs ${estimate.getCost.getCurrency.getSymbol} ${estimate.getCost.getAmount} ")
+      totalCost += estimate.getCost.getAmount
+    }
+    return totalCost
+  }
+
+  private def buildDatasets(client: NexosisClient, bufferedSource: Iterator[String], dataSetNameSuffix: String) = {
+    // Extract the dates off of the first row / header columns in the CSV
+    // and build a dataSetData object with all the dates
+    val dataSetData = ExtractHeadersAndDates(bufferedSource)
+
+    // Now loop over the rest of the rows to get each state's data row
+    while (bufferedSource.hasNext) {
+      val cells = bufferedSource.next.split(",(?=([^\"]*\"[^\"]*\")*[^\"]*$)")
+      // Populate / Replace dataSetData cost data with data from the cells in the next row
+      getRegionalData(dataSetNameSuffix, dataSetData, cells)
+
+      // DataSet Data is complete, upload...
+      client.getDataSets.create(dataSetData.getDataSetName, dataSetData)
+    }
+  }
+
   private def deleteAllHousingData(client :NexosisClient) = {
-    // Delete all these
+    // Delete all house data and sessions
     client.getDataSets.list().getItems.forEach { item =>
       if (item.getDataSetName.contains("-housedata-")) {
         client.getDataSets.remove(item.getDataSetName, DataSetDeleteOptions.CASCASE_BOTH)
@@ -134,12 +189,11 @@ object ForecastHomePrices {
     }
   }
 
-  private def getRegionalData(dataSetData: DataSetData, cells: Array[String]) = {
+  private def getRegionalData(dataSetNameSuffix: String, dataSetData: DataSetData, cells: Array[String]) = {
     val regionData: util.List[util.Map[String, String]] = dataSetData.getData
 
     // Update DataSet name based on value in first position of Cells array
-    val timestamp: Long = System.currentTimeMillis / 1000
-    val dataSetName = cells(1).replace("\"", "").replace(" ", "_").toLowerCase() + "-housedata-" + timestamp.toString;
+    val dataSetName = cells(1).replace("\"", "").replace(" ", "_").toLowerCase() + dataSetNameSuffix;
     dataSetData.setDataSetName(dataSetName)
 
     // println(cells(0)) // column 0 is RegionID - not needed
@@ -196,9 +250,6 @@ object ForecastHomePrices {
     // Add the columns to the DataSet Data
     dataSetData.setColumns(cols)
   }
-
-
-
 
   private def plotTimeSeries(dataSetData: DataSetData, results: SessionResult) = {
     val historical = new TimeSeries("Historical Monthly Home Price")

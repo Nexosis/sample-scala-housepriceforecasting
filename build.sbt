@@ -10,7 +10,7 @@ resolvers +=
 
 libraryDependencies ++= Seq(
   // https://mvnrepository.com/artifact/com.nexosis/nexosisclient-java
-  "com.nexosis" % "nexosisclient-java" % "1.1.0",
+  "com.nexosis" % "nexosisclient-java" % "1.1.2",
   // https://mvnrepository.com/artifact/org.jfree/jfreechart
   "org.jfree" % "jfreechart" % "1.0.19"
 )
